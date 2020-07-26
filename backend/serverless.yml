@@ -1,0 +1,242 @@
+service:
+  name: serverless-feed-app
+
+plugins:
+  - serverless-webpack
+  - serverless-iam-roles-per-function
+
+provider:
+  name: aws
+  runtime: nodejs12.x
+
+  stage: ${opt:stage, 'dev'}
+  region: ${opt:region, 'us-east-1'}
+
+  environment:
+    FEED_TABLE: FeedItems-${self:provider.stage}
+    USER_ID_INDEX: UserIdIndex
+    FEED_S3_BUCKET: serverless-udagram-feeds-${self:provider.stage}
+    SIGNED_URL_EXPIRATION: 300
+
+custom:
+  topicName: feedItemsTopic-${self:provider.stage}
+  documentation:
+    api:
+      info:
+        version: v1.0.0
+        title: FEEDs API
+        description: Serverless application for Managing Feed Items
+    models:
+      - name: FeedRequest
+        contentType: application/json
+        schema: ${file(models/create-feed-request.json)}
+      - name: FeedUpdateRequest
+        contentType: application/json
+        schema: ${file(models/update-feed-request.json)}
+
+functions:
+
+  Auth:
+    handler: src/lambda/auth/auth0Authorizer.handler
+
+  # TODO: Configure this function
+  GetFeeds:
+    handler: src/lambda/http/getFeeds.handler
+    iamRoleStatements:
+      - Effect: Allow
+        Action:
+          - dynamodb:Query
+        Resource: arn:aws:dynamodb:${self:provider.region}:*:table/${self:provider.environment.FEED_TABLE}/index/${self:provider.environment.USER_ID_INDEX}
+    events:
+      - http:
+          method: get
+          path: feeds
+          cors: true
+          authorizer: Auth
+
+  # TODO: Configure this function
+  CreateFeed:
+    handler: src/lambda/http/createFeed.handler
+    iamRoleStatements:
+      - Effect: Allow
+        Action:
+          - dynamodb:PutItem
+        Resource: arn:aws:dynamodb:${self:provider.region}:*:table/${self:provider.environment.FEED_TABLE}
+    events:
+      - http:
+          method: post
+          path: feeds
+          cors: true
+          authorizer: Auth
+          reqValidatorName: RequestBodyValidator
+          documentation:
+            summary: Create a new feed item
+            description: Create a new feed item
+            requestModels:
+              'application/json': FeedRequest
+
+  # TODO: Configure this function
+  UpdateFeed:
+    handler: src/lambda/http/updateFeed.handler
+    iamRoleStatements:
+      - Effect: Allow
+        Action:
+          - dynamodb:UpdateItem
+        Resource: arn:aws:dynamodb:${self:provider.region}:*:table/${self:provider.environment.FEED_TABLE}
+    events:
+      - http:
+          method: patch
+          path: feeds/{FeedId}
+          cors: true
+          authorizer: Auth
+          reqValidatorName: RequestBodyValidator
+          documentation:
+            summary: Update feed item
+            description: Update feed item
+            requestModels:
+              'application/json': FeedUpdateRequest
+
+
+  # Delete Feed Configure this function
+  DeleteFeed:
+    handler: src/lambda/http/deleteFeed.handler
+    iamRoleStatements:
+      - Effect: Allow
+        Action:
+          - dynamodb:DeleteItem
+        Resource: arn:aws:dynamodb:${self:provider.region}:*:table/${self:provider.environment.FEED_TABLE}
+    events:
+      - http:
+          method: delete
+          path: feeds/{feedId}
+          cors: true
+          authorizer: Auth
+
+  # TODO: Configure this function
+  GenerateUploadUrl:
+    handler: src/lambda/http/generateUploadUrl.handler
+    iamRoleStatements:
+      - Effect: Allow
+        Action:
+          - s3:PutObject
+          - s3:GetObject
+        Resource: arn:aws:s3:::${self:provider.environment.FEED_S3_BUCKET}/*
+    events:
+      - http:
+          method: post
+          path: feeds/{feedId}/attachment
+          cors: true
+          authorizer: Auth
+
+resources:
+  Resources:
+    GatewayResponseDefault4XX:
+      Type: AWS::ApiGateway::GatewayResponse
+      Properties:
+        ResponseParameters:
+          gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+          gatewayresponse.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+          gatewayresponse.header.Access-Control-Allow-Methods: "'GET,OPTIONS,POST'"
+        ResponseType: DEFAULT_4XX
+        RestApiId:
+          Ref: ApiGatewayRestApi
+
+    FeedsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        AttributeDefinitions:
+          - AttributeName: userId
+            AttributeType: S
+          - AttributeName: createdAt
+            AttributeType: S
+          - AttributeName: feedId
+            AttributeType: S
+        KeySchema:
+          - AttributeName: userId
+            KeyType: HASH          
+          - AttributeName: feedId
+            KeyType: RANGE
+        BillingMode: PAY_PER_REQUEST
+        TableName: ${self:provider.environment.FEED_TABLE}
+        LocalSecondaryIndexes:
+          - IndexName: ${self:provider.environment.USER_ID_INDEX}
+            KeySchema:
+              - AttributeName: userId
+                KeyType: HASH
+              - AttributeName: createdAt
+                KeyType: RANGE
+            Projection:
+              ProjectionType: ALL # What attributes will be copied to an index
+
+    AttachmentsBucket:
+      Type: AWS::S3::Bucket
+      DependsOn: SNSTopicPolicy
+      Properties:
+        BucketName: ${self:provider.environment.FEED_S3_BUCKET}
+        NotificationConfiguration:
+          TopicConfigurations:
+            - Event: s3:ObjectCreated:Put
+              Topic: !Ref FeedTopic
+        CorsConfiguration:
+          CorsRules:
+            -
+              AllowedOrigins:
+                - '*'
+              AllowedHeaders:
+                - '*'
+              AllowedMethods:
+                - GET
+                - PUT
+                - POST
+                - DELETE
+                - HEAD
+              MaxAge: 3000
+
+    BucketPolicy:
+      Type: AWS::S3::BucketPolicy
+      Properties:
+        PolicyDocument:
+          Id: MyPolicy
+          Version: "2012-10-17"
+          Statement:
+            - Sid: PublicReadForGetBucketObjects
+              Effect: Allow
+              Principal: '*'
+              Action: 's3:GetObject'
+              Resource: 'arn:aws:s3:::${self:provider.environment.FEED_S3_BUCKET}/*'
+        Bucket: !Ref AttachmentsBucket
+
+    SNSTopicPolicy:
+      Type: AWS::SNS::TopicPolicy
+      Properties:
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                AWS: "*"
+              Action: sns:Publish
+              Resource:
+                !Ref FeedTopic
+              Condition:
+                ArnLike:
+                  AWS:SourceArn: arn:aws:s3:::${self:provider.environment.FEED_S3_BUCKET}
+        Topics:
+          - !Ref FeedTopic
+
+    FeedTopic:
+      Type: AWS::SNS::Topic
+      Properties:
+        DisplayName: Image bucket topic
+        TopicName: ${self:custom.topicName}
+          
+
+    # TODO: Add any necessary AWS resources
+    RequestBodyValidator:
+      Type: AWS::ApiGateway::RequestValidator
+      Properties:
+        Name: 'request-body-validator'
+        RestApiId:
+          Ref: ApiGatewayRestApi
+        ValidateRequestBody: true
+        ValidateRequestParameters: false
