@@ -4,6 +4,7 @@ The project provides the following features-
 1) Create new feed.
 2) Get all feeds along with feed image.
 3) Update a feed to attach image to it.
+4) Delete feeds
 
 # Functionality of the application
 
