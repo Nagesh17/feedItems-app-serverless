@@ -25,8 +25,6 @@ export const authConfig = {
   clientId: '...',  // Client id from an Auth0 application
   callbackUrl: 'http://localhost:3000/callback'
 }
-```
-
 
 # How to run the application
 
